@@ -7,13 +7,32 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
+
+type State int
+
+const (
+	idle State = iota
+	mapInProgress
+	mapCompleted
+	completed
+)
+
+type Task struct {
+	fileName  string
+	id        int
+	state     State
+	beginTime time.Time
+}
 
 type Coordinator struct {
 	// Your definitions here.
 	Files   []string
 	Buckets int
-	Mu      sync.Mutex
+	Tasks   []Task
+
+	mu sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -23,16 +42,21 @@ type Coordinator struct {
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
 
-func (c *Coordinator) AllocateTask(args *Args, reply *Reply) error {
-	c.Mu.Lock()
-	defer c.Mu.Unlock()
-	reply.File = c.Files[len(c.Files)-1]
-	c.Files = c.Files[:len(c.Files)-1]
+func (c *Coordinator) AllocateTask(args *Args, reply *TaskReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, task := range c.Tasks {
+		if task.state == idle {
+			task.beginTime = time.Now()
+			task.state = mapInProgress
+			reply.File = task.fileName
+			reply.TaskNum = task.id
+			reply.TaskType = mapType
+			reply.Buckets = c.Buckets
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -75,7 +99,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	copy(c.Files, files)
 	c.Buckets = nReduce
-
+	for index, file := range files {
+		task := Task{file, index, idle, time.Now()}
+		c.Tasks = append(c.Tasks, task)
+	}
 	c.server()
 	return &c
 }

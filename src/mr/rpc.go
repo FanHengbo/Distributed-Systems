@@ -16,20 +16,26 @@ import (
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
-}
+type TaskType int
 
-type ExampleReply struct {
-	Y int
-}
+const (
+	mapType TaskType = iota
+	reduceType
+)
 
 type Args struct {
 	X int
 }
 
-type Reply struct {
-	File string
+type Initialization struct {
+	buckets int
+}
+
+type TaskReply struct {
+	File     string
+	TaskNum  int
+	TaskType TaskType
+	Buckets  int
 }
 
 // Add your RPC definitions here.
