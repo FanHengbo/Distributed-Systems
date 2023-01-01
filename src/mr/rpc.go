@@ -21,6 +21,8 @@ type TaskType int
 const (
 	mapType TaskType = iota
 	reduceType
+	sleep
+	done
 )
 
 type Args struct {
@@ -31,8 +33,14 @@ type Initialization struct {
 	buckets int
 }
 
+type TaskArgs struct {
+	IntermediateFile []string
+	TaskNum          int
+	TaskType         TaskType
+}
+
 type TaskReply struct {
-	File     string
+	File     []string
 	TaskNum  int
 	TaskType TaskType
 	Buckets  int

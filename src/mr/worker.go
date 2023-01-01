@@ -2,15 +2,12 @@ package mr
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
-	"sort"
-	"strconv"
 )
 
 //
@@ -19,6 +16,11 @@ import (
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type IntermediateOutput struct {
+	Key    string
+	Values []string
 }
 
 // for sorting by key.
@@ -63,9 +65,10 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-func doMapTask(mapf func(string, string) []KeyValue, reply TaskReply) {
+func doMapTask(mapf func(string, string) []KeyValue, reply *TaskReply, response *TaskArgs) {
 	// Open returned file
-	file, err := os.Open(reply.File)
+	filename := reply.File[0]
+	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", reply.File)
 	}
@@ -74,52 +77,34 @@ func doMapTask(mapf func(string, string) []KeyValue, reply TaskReply) {
 		log.Fatalf("cannot read %v", reply.File)
 	}
 	file.Close()
-	kva := mapf(reply.File, string(content))
+	intermediate := mapf(filename, string(content))
+	intermediateFilesMap := make(map[int][]KeyValue)
+	currentDir, _ := os.Getwd()
+	nBuckets := reply.Buckets
+	intermediateFilesName := make([]string, nBuckets)
+	for _, kv := range intermediate {
+		bucketIndex := ihash(kv.Key) % nBuckets
+		intermediateFilesMap[bucketIndex] = append(intermediateFilesMap[bucketIndex], kv)
+	}
 
-	sort.Sort(ByKey(kva))
-
-	// Store in temporary files
-	i := 0
-	reduceTaskFileName := []string{}
-
-	for i < len(kva) {
-		j := i + 1
-		for j < len(kva) && kva[j].Key == kva[i].Key {
-			j++
-		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, kva[k].Value)
-		}
-		recudeTaskNum := ihash(kva[i].Key) % reply.Buckets
-		currentDir, _ := os.Getwd()
-		temporaryFileName := currentDir + "mr-" + strconv.Itoa(reply.TaskNum) + "-" + strconv.Itoa(recudeTaskNum)
-		var needToRename bool = false
-		if _, err := os.Stat(temporaryFileName); errors.Is(err, os.ErrNotExist) {
-			file, err = ioutil.TempFile(currentDir, "")
-			if err != nil {
-				log.Fatalf("Cannot create a temporary file")
-			}
-			needToRename = true
-		} else {
-			file, err = os.OpenFile(temporaryFileName, os.O_APPEND, 0777)
-			if err != nil {
-				log.Fatalf("Cannot open %v", temporaryFileName)
-			}
-		}
+	// Store in intermediate files
+	for i := 0; i < nBuckets; i++ {
+		file, err = ioutil.TempFile(currentDir, "")
+		fileName := fmt.Sprintf("mr-%d-%d", reply.TaskNum, i)
 		enc := json.NewEncoder(file)
-		for _, kv := range values {
+		for _, kv := range intermediateFilesMap[i] {
 			err := enc.Encode(&kv)
 			if err != nil {
-				log.Fatalf("Cannot write to the temporary file")
+				log.Fatalf("cannot write to file %v", fileName)
 			}
 		}
-		if needToRename {
-			os.Rename(file.Name(), temporaryFileName)
-			reduceTaskFileName = append(reduceTaskFileName, temporaryFileName)
-		}
+		os.Rename(file.Name(), fileName)
 		file.Close()
+		intermediateFilesName[i] = fileName
 	}
+	copy(response.IntermediateFile, intermediateFilesName)
+	response.TaskNum = reply.TaskNum
+	response.TaskType = mapType
 }
 
 func AskForTask() TaskReply {
@@ -129,6 +114,13 @@ func AskForTask() TaskReply {
 
 	return reply
 }
+
+/*
+func SendMapResult(result []string) {
+	mapResult := MapResult{result}
+
+}
+*/
 
 //
 // send an RPC request to the coordinator, wait for the response.

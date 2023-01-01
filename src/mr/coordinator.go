@@ -14,13 +14,19 @@ type State int
 
 const (
 	idle State = iota
-	mapInProgress
-	mapCompleted
+	inprogress
 	completed
 )
 
-type Task struct {
+type MapTask struct {
 	fileName  string
+	id        int
+	state     State
+	beginTime time.Time
+}
+
+type ReduceTask struct {
+	fileName  []string
 	id        int
 	state     State
 	beginTime time.Time
@@ -28,9 +34,12 @@ type Task struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	Files   []string
-	Buckets int
-	Tasks   []Task
+	Files       []string
+	Buckets     int
+	MapTasks    []MapTask
+	ReduceTasks []ReduceTask
+	mapLeft     int
+	reduceLeft  int
 
 	mu sync.Mutex
 }
@@ -46,19 +55,25 @@ type Coordinator struct {
 func (c *Coordinator) AllocateTask(args *Args, reply *TaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, task := range c.Tasks {
-		if task.state == idle {
-			task.beginTime = time.Now()
-			task.state = mapInProgress
-			reply.File = task.fileName
-			reply.TaskNum = task.id
-			reply.TaskType = mapType
-			reply.Buckets = c.Buckets
-			return nil
+	if c.mapLeft != 0 {
+		// Allocate map task
+		for _, task := range c.MapTasks {
+			if task.state == idle {
+				task.beginTime = time.Now()
+				task.state = inprogress
+				reply.File = task.fileName
+				reply.TaskNum = task.id
+				reply.TaskType = mapType
+				reply.Buckets = c.Buckets
+				return nil
+			}
 		}
 	}
+
 	return nil
 }
+
+//func (c *Coordinator) ReportStatus(args *Args, reply *TaskReply)
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -84,6 +99,9 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	if c.mapLeft == 0 && c.reduceLeft == 0 {
+		ret = true
+	}
 
 	return ret
 }
@@ -99,9 +117,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	copy(c.Files, files)
 	c.Buckets = nReduce
+	c.mapLeft = len(files)
+	c.reduceLeft = nReduce
 	for index, file := range files {
-		task := Task{file, index, idle, time.Now()}
-		c.Tasks = append(c.Tasks, task)
+		task := MapTask{file, index, idle, time.Now()}
+		c.MapTasks = append(c.MapTasks, task)
 	}
 	c.server()
 	return &c
