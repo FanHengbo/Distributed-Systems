@@ -33,13 +33,13 @@ type Initialization struct {
 	buckets int
 }
 
-type TaskArgs struct {
+type TaskRequest struct {
 	IntermediateFile []string
 	TaskNum          int
 	TaskType         TaskType
 }
 
-type TaskReply struct {
+type TaskResponse struct {
 	File     []string
 	TaskNum  int
 	TaskType TaskType

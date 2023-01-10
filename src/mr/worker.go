@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"time"
 )
 
 //
@@ -48,16 +50,28 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
 	// uncomment to send the Example RPC to the coordinator.
-
 	// First ask the coordinator for task
-	reply := AskForTask()
+
+	// Here we define the process of worker asking coordinator for task as request,
+	// and the result of coordinator returned as response. When the worker enter
+	// the loop for the first time, it will send an empty request to coordinator,
+	// and the coordinator would send the first task back to the worker. After
+	// finishing first task, the worker will store its result to request, so
+	// when next time worker ask for a task, it will piggyback the last result
+	// to the coordinator, and the coordinator would send next task content.
+	request := TaskRequest{}
 	for {
+		reply := AskForTask(&request)
 		switch reply.TaskType {
 		case mapType:
-			doMapTask(mapf, reply)
+			doMapTask(mapf, &reply, &request)
 		case reduceType:
+			doReduceTask(reducef, &reply, &request)
+		case sleep:
+			time.Sleep(time.Second)
+		case done:
+			return
 		default:
 			fmt.Println("Unknown task type")
 		}
@@ -65,7 +79,58 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-func doMapTask(mapf func(string, string) []KeyValue, reply *TaskReply, response *TaskArgs) {
+func doReduceTask(reducef func(string, []string) string, reply *TaskResponse, request *TaskRequest) {
+	// First gather all the keyvalues from given intermediate files
+	kva := []KeyValue{}
+	for _, fileName := range reply.File {
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("recude error: cannot read intermediate file %v", fileName)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	outputFileName := fmt.Sprintf("mr-out-%d", reply.TaskNum)
+	sort.Sort(ByKey(kva))
+
+	ofile, _ := os.Create(outputFileName)
+
+	//
+	// call Reduce on each distinct key in kva[],
+	// and print the result to mr-out-<ReduceTaskNum>.
+	//
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := reducef(kva[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+
+	request.TaskType = reduceType
+	request.TaskNum = reply.TaskNum
+}
+
+func doMapTask(mapf func(string, string) []KeyValue, reply *TaskResponse, request *TaskRequest) {
 	// Open returned file
 	filename := reply.File[0]
 	file, err := os.Open(filename)
@@ -102,15 +167,14 @@ func doMapTask(mapf func(string, string) []KeyValue, reply *TaskReply, response 
 		file.Close()
 		intermediateFilesName[i] = fileName
 	}
-	copy(response.IntermediateFile, intermediateFilesName)
-	response.TaskNum = reply.TaskNum
-	response.TaskType = mapType
+	copy(request.IntermediateFile, intermediateFilesName)
+	request.TaskNum = reply.TaskNum
+	request.TaskType = mapType
 }
 
-func AskForTask() TaskReply {
-	reply := TaskReply{}
-	args := Args{}
-	call("Coordinator.AllocateTask", &args, &reply)
+func AskForTask(req *TaskRequest) TaskResponse {
+	reply := TaskResponse{}
+	call("Coordinator.AllocateTask", &req, &reply)
 
 	return reply
 }

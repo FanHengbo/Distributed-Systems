@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -34,12 +35,13 @@ type ReduceTask struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	Files       []string
-	Buckets     int
-	MapTasks    []MapTask
-	ReduceTasks []ReduceTask
-	mapLeft     int
-	reduceLeft  int
+	Files             []string
+	Buckets           int
+	MapTasks          []MapTask
+	ReduceTasks       []ReduceTask
+	mapLeft           int
+	reduceLeft        int
+	intermediateFiles [][]string
 
 	mu sync.Mutex
 }
@@ -52,15 +54,71 @@ type Coordinator struct {
 // the RPC argument and reply types are defined in rpc.go.
 //
 
-func (c *Coordinator) AllocateTask(args *Args, reply *TaskReply) error {
+func (c *Coordinator) AllocateTask(req *TaskRequest, reply *TaskResponse) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !reflect.DeepEqual(req, TaskRequest{}) {
+		// Not the first time to allocate task
+		// We need first process the result sent back
+		taskId := req.TaskNum
+		if req.TaskType == mapType {
+			c.intermediateFiles = append(c.intermediateFiles, req.IntermediateFile)
+			c.MapTasks[taskId].state = completed
+			c.mapLeft--
+
+		} else if req.TaskType == reduceType {
+			c.ReduceTasks[taskId].state = completed
+			c.reduceLeft--
+		}
+	}
+	timeNow := time.Now()
+
 	if c.mapLeft != 0 {
+		// Map tasks are not finished, so we first need to check whether exsiting task is timeout
+		for _, task := range c.MapTasks {
+			if task.state == inprogress && timeNow.Sub(task.beginTime) > time.Second*10 {
+				// We need to reissue the task. So change the state of it to idle.
+				task.state = idle
+			}
+		}
 		// Allocate map task
 		for _, task := range c.MapTasks {
 			if task.state == idle {
 				task.beginTime = time.Now()
 				task.state = inprogress
+
+				reply.File[0] = task.fileName
+				reply.TaskNum = task.id
+				reply.TaskType = mapType
+				reply.Buckets = c.Buckets
+				return nil
+			}
+		}
+		// Every exsiting map task is inprogress, so we should ask the worker to sleep
+		reply.TaskType = sleep
+		return nil
+	} else if c.reduceLeft != 0 {
+		if reflect.DeepEqual(c.ReduceTasks[0].fileName, []string{}) {
+			// Reduce task is not initializated
+			for _, fileArray := range c.intermediateFiles {
+				for j, fileName := range fileArray {
+					c.ReduceTasks[j].fileName = append(c.ReduceTasks[j].fileName, fileName)
+				}
+			}
+		}
+		for _, task := range c.MapTasks {
+			if task.state == inprogress && timeNow.Sub(task.beginTime) > time.Second*10 {
+				// We need to reissue the task. So change the state of it to idle.
+				task.state = idle
+			}
+		}
+
+		// Reduce task now is fully initialized
+		for _, task := range c.ReduceTasks {
+			if task.state == idle {
+				task.beginTime = time.Now()
+				task.state = inprogress
+
 				reply.File = task.fileName
 				reply.TaskNum = task.id
 				reply.TaskType = mapType
@@ -69,7 +127,7 @@ func (c *Coordinator) AllocateTask(args *Args, reply *TaskReply) error {
 			}
 		}
 	}
-
+	reply.TaskType = done
 	return nil
 }
 
@@ -119,10 +177,18 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.Buckets = nReduce
 	c.mapLeft = len(files)
 	c.reduceLeft = nReduce
+	c.MapTasks = make([]MapTask, c.mapLeft)
+	c.ReduceTasks = make([]ReduceTask, nReduce)
 	for index, file := range files {
-		task := MapTask{file, index, idle, time.Now()}
-		c.MapTasks = append(c.MapTasks, task)
+		mapTask := MapTask{file, index, idle, time.Time{}}
+		c.MapTasks[index] = mapTask
 	}
+
+	for i := 0; i < nReduce; i++ {
+		reduceTask := ReduceTask{[]string{}, i, idle, time.Time{}}
+		c.ReduceTasks[i] = reduceTask
+	}
+
 	c.server()
 	return &c
 }
